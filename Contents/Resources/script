@@ -1,0 +1,338 @@
+#!/usr/bin/env php
+<?php
+
+#
+# Flickr Store
+# (c) 2008-2014 Fil <fil@rezo.net>
+# licensed under GNU/GPL3
+#
+# Documentation: http://zzz.rezo.net/-Flickr-Store-.html
+#
+# version 0.5 -- 25.07.2014
+
+# default privacy values when uploading new pictures:
+define('_IS_PUBLIC', 0);
+define('_IS_FRIEND', 0);
+define('_IS_FAMILY', 0);
+
+# no memory limit
+ini_set('memory_limit', '2G');
+
+// helper function to print to the console or to Platypus
+function zprint($x) {
+#	error_log($x . ($_ENV['APP_BUNDLER'] ? "<br/>\n" : ''));
+	error_log($x);
+}
+
+// Check php version and set a few constants
+function checkenv() {
+	define('__DIRO__', realpath(dirname(__FILE__)).'/');
+	require_once __DIRO__.'api_key.inc';
+	define('_PREFS', $_ENV['HOME'].'/.flickstore/');
+	if (!is_dir(_PREFS)) {
+		if (!mkdir(_PREFS))
+			die ('Need to create a prefs directory in '._PREFS);
+	}
+}
+
+// Include phpFlickr
+function include_phpFlickr() {
+	require_once __DIRO__.'phpflickr/phpFlickr.php';
+}
+
+// file_set_contents to write a file
+function file_set_contents($file, $content) {
+	if (!$fh = fopen($file, 'wb')
+	OR !fwrite($fh, $content)
+	OR !fclose($fh)
+	OR !(filesize($file) == strlen($content)))
+		return false;
+	return true;
+}
+
+checkenv();
+include_phpFlickr();
+
+class flickrStore extends phpFlickr {
+	var $photos = null;
+	var $tags = null;
+
+	function auth_desktop($perms) {
+			if (!$token = @unserialize(file_get_contents(_PREFS.'token2.txt'))) {
+			if (!$frob = @file_get_contents(_PREFS.'frob.txt')) {
+				zprint("Requesting a new frob...");
+				if ($frob = $this->auth_getFrob()) {
+					file_set_contents(_PREFS.'frob.txt', $frob);
+					zprint("got frob");
+				}
+			}
+			if (!$frob)
+				die ("Couldn't get no frob\n");
+		}
+
+		$browser_launch = !!$_ENV['APP_BUNDLER'];
+		$display_message = true;
+		while (!$token) {
+			zprint("Requesting a token...");
+			if ($token = $this->auth_getToken($frob)) {
+				zprint("got token");
+				file_set_contents(_PREFS.'token2.txt', serialize($token));
+				@unlink(_PREFS.'frob.txt');
+				break;
+			}
+
+			if ($display_message) {
+				zprint('error '.$this->error_code.': '.$this->error_msg);
+				zprint("We are not authenticated");
+				zprint("Please follow this link to authorize the application:");
+				$api_sig = md5($this->secret . "api_key" . $this->api_key . "frob" . $frob . "perms" . $perms);
+				$link = "https://www.flickr.com/services/auth/?api_key=" . $this->api_key .  "&frob=" . $frob . "&perms=" . $perms . "&api_sig=". $api_sig;
+				zprint($link);
+
+				if ($browser_launch) {
+					`open "$link"`;
+				}
+
+				$display_message = false;
+			}
+
+			if (!$_ENV['APP_BUNDLER'])
+				exit;
+			else
+				sleep(10);
+		}
+
+		return $token;
+	}
+
+	function get_allPhotosNoCache($uid = 'me') {
+		$page = 1;
+		$this->photos = array();
+		zprint("Retrieving picture data from Flickr");
+		do {
+			zprint("Requesting page $page". ($pages ? "/$pages" : ''));
+			$a = $this->photos_search(array(
+				'user_id'=> $uid,
+				'per_page' => 500,
+				'page' => $page,
+				'extras' => 'original_format,date_taken,tags'
+			));
+			$pages = $a['pages'];
+			if (!is_array($a['photo'])) {
+				var_dump($a);
+				die ('http error');
+			}
+			foreach ($a['photo'] as $p)
+				$this->photos[$p['id']] = $p;
+		} while ($page++ < $pages);
+
+		return count($this->photos);
+	}
+
+	// cache will be invalidated if too old,
+	// or if a new picture has been uploaded
+	// or a new picture deleted
+	// unfortunately we can't check for tag or privacy changes
+	function get_allPhotos($uid = 'me') {
+		$cache = @filemtime(_PREFS.'cache.txt') > time()-60*60
+		AND $this->photos = @unserialize(file_get_contents(_PREFS.'cache.txt'));
+
+		if ($cache) {
+			$a = $this->photos_search(array(
+				'user_id'=> $uid,
+				'per_page' => 1
+			));
+			if ($a['total'] != count($this->photos)
+			OR $a['photo'][0]['id'] != max(array_keys($this->photos))) {
+				zprint("New picture(s) detected");
+				$cache = false;
+			}
+		}
+
+		if ($cache)
+			zprint("Retrieving photo information from cache");
+		else if ($this->get_allPhotosNoCache())
+			file_set_contents(_PREFS.'cache.txt', serialize($this->photos));
+		else
+			die ('No data');
+		return count($this->photos);
+	}
+
+	function get_allTags() {
+		if (!isset($this->tags))
+		if (is_array($this->photos)) {
+			$this->tags = array();
+			foreach ($this->photos as $photo)
+				foreach (explode(' ', $photo['tags']) as $tag)
+					$this->tags[$tag][] = $photo['id'];
+		}
+		return $this->tags;
+	}
+
+	// Tag md5 a certain photo already on flickr
+	function set_md5tag($id) {
+		static $n;
+		// Check that id exists
+		if (!$this->photos[$id]) {
+			zprint("photo $id does not exist");
+			return false;
+		}
+
+		// Check that the md5 tag is not already there
+		if ($this->photos[$id]['tags']
+		AND preg_match(',\bfile:md5=[0-9a-f]{32},S', $this->photos[$id]['tags'])) {
+			return true;
+		}
+		// Download (!) the original file and compute its tag
+		$original = $this->buildPhotoURL($this->photos[$id], 'original');
+		zprint("$id: reading $original");
+		if (!$im = file_get_contents($original)) {
+			zprint("http error");
+			return false;
+		}
+		$tags = array('file:md5='.md5($im), 'file:bytes='.strlen($im));
+		unset($im);
+		// tag the image on Flickr and in our local cache
+		if ($this->photos_addTags($id, join(',',$tags))) {
+			$this->photos[$id]['tags'] = join(' ', array_merge(explode(' ',$this->photos[$id]['tags']), $tags));
+			file_set_contents(_PREFS.'cache.txt', serialize($this->photos));
+			zprint($this->photos[$id]['tags']);
+			return true;
+		}
+		zprint("Could not tag $id");
+		return false;
+	}
+	function set_md5tag_all() {
+		$tag_count = 0;
+
+		$this->get_allTags();
+		foreach ($this->tags as $tag => $c)
+			if (preg_match(',^file:md5=[0-9a-f]{32},S', $tag))
+				$tag_count += count($c);
+
+		if ($tag_count < count($this->photos)) {
+			zprint((count($this->photos) - $tag_count)." files to tag md5. Be patient...");
+			foreach($this->photos as $photo)
+				$this->set_md5tag($photo['id']);
+		}
+	}
+
+	function upload_files($file, $action = false) {
+		$ok = 0;
+		$up = 0;
+		if (is_file($file) AND is_readable($file)
+		AND preg_match(',\.(jpe?g|png)$,iS', $file)) {
+			$md5 = 'file:md5='.md5_file($file);
+			if ($this->tags[$md5]) {
+				#zprint("$file is up: $md5 : ".join(' ', $this->tags[$md5]));
+				return array(1,0);
+			}
+
+			if ($action) {
+				$tags = $md5.' file:bytes='.filesize($file);
+				zprint("Uploading $file");
+				$time = time();
+				$r = $this->sync_upload(
+					$file,
+					null, /* title */
+					null, /* description */
+					$tags, /* tags */
+					_IS_PUBLIC, /* is_public */
+					_IS_FRIEND, /* is_friend */
+					_IS_FAMILY	/* is_family */
+				);
+				if ($r) {
+					$this->tags[$md5] = array($r);
+					zprint("Image $r uploaded in ".(time()-$time)."s ("
+						.(0.1*intval(filesize($file)/1024*10).'kb)'));
+					if ($up = $this->photos_getInfo($r)) {
+						$thumb = $this->buildPhotoURL($up, 'small');
+						zprint($thumb);
+						$up['tags'] = $tags;
+						$this->photos[$r] = $up;
+						file_set_contents(_PREFS.'cache.txt', serialize($this->photos));
+					} else
+						@unlink(_PREFS.'cache.txt');
+					return array(0,1);
+				}
+				zprint("Image not uploaded");
+				return array(0,0);
+			}
+			return array(0,1);
+		}
+		else if (is_dir($file) AND is_readable($file)) {
+			if (!$action)
+				echo ". ";
+			if ($h = opendir($file)) {
+				while (false !== ($next = readdir($h)))
+					if ($next != '.' AND $next != '..') {
+						list($ok_a, $up_a) = $this->upload_files("$file/$next", $action);
+						$ok += $ok_a;
+						$up += $up_a;
+					}
+				closedir($h);
+			}
+		}
+
+		return array($ok, $up);
+	}
+
+	function total_bytes() {
+		$this->get_allTags();
+		$total = 0;
+		foreach($this->tags as $tag => $a) {
+			if (preg_match(',^file:bytes=([0-9]+),S', $tag, $r))
+				$total += count($a) * $r[1];
+		}
+		return $total;
+	}
+
+}
+
+
+// MAIN
+
+// arguments = directories or files to scan
+$files = $argv;
+array_shift($files);
+
+// Welcome
+zprint("------------- Welcome to Flickr Store -------------");
+zprint("--                                               --");
+zprint("-- (c) 2008 Fil - fil@rezo.net ; GNU/GPL 3       --");
+zprint("-- http://zzz.rezo.net/-Flickr-Store-.html       --");
+zprint("--                                               --");
+zprint("-- (c) Dan Coulter www.phpflickr.com             --");
+if ($_ENV['APP_BUNDLER'])
+zprint("-- (c) Sveinbjorn Thordarson www.sveinbjorn.org  --");
+zprint("---------------------------------------------------");
+zprint("");
+
+// initialize
+$f = new flickrStore(_flickr_api_key, _flickr_api_secret);
+$token = $f->auth_desktop("write");
+$f->setToken($token['token']);
+
+zprint("Connected as ".$token['user']['username']." @ Flickr: http://flickr.com/photos/".$token['user']['nsid']);
+
+// retrieve all pictres data from flickr
+$f->get_allPhotos();
+
+// tag non-tagged images
+$f->set_md5tag_all();
+
+// get all current tags
+$f->get_allTags();
+
+// scan directories and files, and upload new ones
+foreach($files as $file) {
+	zprint("Checking dirs");
+	list($ok,$up) = $f->upload_files($file, false);
+	zprint("$ok files already up; $up files to upload");
+	list($ok,$up) = $f->upload_files($file, true);
+	zprint("$ok files ignored; $up files uploaded");
+}
+
+// Write the total number of photos/bytes
+zprint(count($f->photos)." items");
+zprint("total: ". (0.01*intval($f->total_bytes() /1024/1024/1024*100))." Gb");

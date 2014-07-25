@@ -1,0 +1,4 @@
+CFBundleName = "Flickr Store";
+CFBundleShortVersionString = "0.4";
+CFBundleGetInfoString = "Flickr Store version 0.4 Copyright 2008 Fil";
+NSHumanReadableCopyright = "Copyright 2008 Fil.";
