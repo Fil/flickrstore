@@ -28,7 +28,7 @@ function zprint($x) {
 function checkenv() {
 	define('__DIRO__', realpath(dirname(__FILE__)).'/');
 	require_once __DIRO__.'api_key.inc';
-	define('_PREFS', $_ENV['HOME'].'/.flickstore/');
+	define('_PREFS', $_ENV['HOME'].'/.flickrstore/');
 	if (!is_dir(_PREFS)) {
 		if (!mkdir(_PREFS))
 			die ('Need to create a prefs directory in '._PREFS);
