@@ -61,7 +61,9 @@ class flickrStore extends phpFlickr {
 			if (!$token = @unserialize(file_get_contents(_PREFS.'token2.txt'))) {
 			if (!$frob = @file_get_contents(_PREFS.'frob.txt')) {
 				zprint("Requesting a new frob...");
-				if ($frob = $this->auth_getFrob()) {
+				if ($frob = $this->auth_getFrob()
+				AND $frob = $frob['_content']
+				) {
 					file_set_contents(_PREFS.'frob.txt', $frob);
 					zprint("got frob");
 				}
@@ -74,7 +76,8 @@ class flickrStore extends phpFlickr {
 		$display_message = true;
 		while (!$token) {
 			zprint("Requesting a token...");
-			if ($token = $this->auth_getToken($frob)) {
+			if ($token = $this->auth_getToken($frob)
+			AND $token = $token['_content']) {
 				zprint("got token");
 				file_set_contents(_PREFS.'token2.txt', serialize($token));
 				@unlink(_PREFS.'frob.txt');
